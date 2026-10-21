@@ -15,12 +15,18 @@ name: OpenWrt Builder
 on:
   repository_dispatch:
   workflow_dispatch:
+    inputs:
+      ssh:
+        description: '开启 SSH 调试'
+        type: boolean
+        required: false
+        default: false
 
 env:
   REPO_URL: https://github.com/1018ji/ponwrt
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: an7583.yml
+  CONFIG_FILE: an7583.config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   TZ: Asia/Shanghai
@@ -83,6 +89,13 @@ jobs:
         make download -j$(nproc)
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
+
+    - name: Setup SSH session
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.ssh }}
+      uses: owenthereal/action-upterm@v2
+      with:
+        detached: true
+        limit-access-to-actor: true
 
     - name: Compile the firmware
       id: compile
