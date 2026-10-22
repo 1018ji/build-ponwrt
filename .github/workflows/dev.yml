@@ -1,8 +1,8 @@
 #
 # https://github.com/P3TERX/Actions-OpenWrt
 #
-# File: .github/workflows/an7581.yml
-# Description: Build PonWrt (AN7581) using GitHub Actions
+# File: .github/workflows/dev.yml
+# Description: Build PonWrt (AN7581 / AN7583) as DEV artifacts
 #
 # Copyright (c) 2019-2024 P3TERX <https://p3terx.com>
 #
@@ -10,23 +10,19 @@
 # See /LICENSE for more information.
 #
 
-name: AN7581 Builder
+name: DEV Builder
 
 on:
-  repository_dispatch:
   workflow_dispatch:
     inputs:
       ssh:
-        description: '开启 SSH 调试'
         type: boolean
-        required: false
         default: false
 
 env:
   REPO_URL: https://github.com/1018ji/ponwrt
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  CONFIG_FILE: an7581.config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   TZ: Asia/Shanghai
@@ -34,10 +30,16 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [an7581, an7583]
+    env:
+      CONFIG_FILE: ${{ matrix.target }}.config
 
     steps:
     - name: Checkout
-      uses: actions/checkout@main
+      uses: actions/checkout@v4
 
     - name: Initialization environment
       env:
@@ -102,24 +104,25 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
+        make -j$(nproc) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Check space usage
       if: (!cancelled())
       run: df -hT
 
-    - name: Compress firmware targets
-      id: compress
+    - name: Generate artifact name
+      id: name
       if: steps.compile.outputs.status == 'success' && !cancelled()
-      run: |
-        ARCHIVE="targets.tar.gz"
-        tar -czf "$ARCHIVE" -C openwrt/bin/targets .
-        echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+      run: echo "name=DEV-$(date +%Y-%m-%d)-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
 
-    - name: Upload firmware archive
-      uses: actions/upload-artifact@main
-      if: steps.compress.outputs.archive != '' && !cancelled()
+    - name: Upload firmware artifact
+      uses: actions/upload-artifact@v4
+      if: steps.name.outputs.name != '' && !cancelled()
       with:
-        name: targets.tar.gz
-        path: ${{ steps.compress.outputs.archive }}
+        name: ${{ steps.name.outputs.name }}
+        retention-days: 3
+        if-no-files-found: error
+        path: |
+          openwrt/bin/targets/airoha/${{ matrix.target }}/*initramfs-recovery.itb
+          openwrt/bin/targets/airoha/${{ matrix.target }}/*squashfs-sysupgrade.itb
