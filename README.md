@@ -1,39 +1,56 @@
-**English** | [中文](https://p3terx.com/archives/build-openwrt-with-github-actions.html)
+# build-ponwrt
 
-# Actions-OpenWrt
+使用 GitHub Actions 编译 PonWrt 固件，目标平台为 Airoha **AN7581** 和 **AN7583**。
 
-[![LICENSE](https://img.shields.io/github/license/mashape/apistatus.svg?style=flat-square&label=LICENSE)](https://github.com/P3TERX/Actions-OpenWrt/blob/master/LICENSE)
-![GitHub Stars](https://img.shields.io/github/stars/P3TERX/Actions-OpenWrt.svg?style=flat-square&label=Stars&logo=github)
-![GitHub Forks](https://img.shields.io/github/forks/P3TERX/Actions-OpenWrt.svg?style=flat-square&label=Forks&logo=github)
+> [!IMPORTANT]
+> 本仓库编译的源码是 **[1018ji/ponwrt](https://github.com/1018ji/ponwrt)**（`master` 分支），
+> **不是**原版 [pbs05/ponwrt](https://github.com/pbs05/ponwrt)。
+> `1018ji/ponwrt` 是 `pbs05/ponwrt` 的下游仓库，供本人向原版提交 PR 使用。
 
-A template for building OpenWrt with GitHub Actions
+> [!TIP]
+> 如果你 fork 本仓库，记得把 `release.yml` 和 `dev.yml` 中的 `REPO_URL` 改为原版仓库
+> `https://github.com/pbs05/ponwrt`（或你自己的源码仓库），并确认 `REPO_BRANCH` 分支名正确。
 
-## Usage
+## Workflow
 
-- Click the [Use this template](https://github.com/P3TERX/Actions-OpenWrt/generate) button to create a new repository.
-- Generate `.config` files using [Lean's OpenWrt](https://github.com/coolsnowwolf/lede) source code. ( You can change it through environment variables in the workflow file. )
-- Push `.config` file to the GitHub repository.
-- Select `Build OpenWrt` on the Actions page.
-- Click the `Run workflow` button.
-- When the build is complete, click the `Artifacts` button in the upper right corner of the Actions page to download the binaries.
+| Workflow | 触发方式 | 产物 | 保留 |
+| --- | --- | --- | --- |
+| **RELEASE Builder**（`release.yml`） | 每天北京时间 05:00 自动运行，也可手动触发 | Release `RELEASE-YYYY-MM-DD` | 最近 7 个 |
+| **DEV Builder**（`dev.yml`） | 仅手动触发，可选开启 SSH 调试 | Artifact `DEV-YYYY-MM-DD-<机型>` | 3 天 |
 
-## Tips
+两个 workflow 都会在两台 runner 上并行编译 AN7581 和 AN7583，一个机型失败不影响另一个。
 
-- It may take a long time to create a `.config` file and build the OpenWrt firmware. Thus, before create repository to build your own firmware, you may check out if others have already built it which meet your needs by simply [search `Actions-Openwrt` in GitHub](https://github.com/search?q=Actions-openwrt).
-- Add some meta info of your built firmware (such as firmware architecture and installed packages) to your repository introduction, this will save others' time.
+### RELEASE
+
+- 编译前检查 `1018ji/ponwrt` 的最新 commit，与上一个 Release 相同则跳过，不重复发布。
+- Release 说明中记录本次编译所用的 `1018ji/ponwrt` commit。
+- tag 为秒级时间戳（如 `2026-10-21-10-23-05`），由 workflow 自动创建。
+
+### DEV
+
+- 在 Actions 页面选择 `DEV Builder` → `Run workflow`，勾选 `ssh` 可在编译前进入 SSH 调试。
+- 编译完成后在本次运行页面底部下载 Artifact（zip 格式，解压后为固件）。
+
+## 固件
+
+每个机型只发布以下两类文件，位于源码的 `bin/targets/airoha/<机型>/`：
+
+- `*initramfs-recovery.itb`
+- `*squashfs-sysupgrade.itb`
+
+## 自定义
+
+- `an7581.config` / `an7583.config`：各机型的编译配置
+- `diy-part1.sh`：更新 feeds 前执行，可修改 feeds 源
+- `diy-part2.sh`：安装 feeds 后执行，可修改默认配置
 
 ## Credits
 
-- [Microsoft Azure](https://azure.microsoft.com)
-- [GitHub Actions](https://github.com/features/actions)
+- [1018ji/ponwrt](https://github.com/1018ji/ponwrt)
+- [pbs05/ponwrt](https://github.com/pbs05/ponwrt)
+- [P3TERX/Actions-OpenWrt](https://github.com/P3TERX/Actions-OpenWrt)
 - [OpenWrt](https://github.com/openwrt/openwrt)
-- [coolsnowwolf/lede](https://github.com/coolsnowwolf/lede)
-- [Mikubill/transfer](https://github.com/Mikubill/transfer)
-- [softprops/action-gh-release](https://github.com/softprops/action-gh-release)
-- [Mattraks/delete-workflow-runs](https://github.com/Mattraks/delete-workflow-runs)
-- [dev-drprasad/delete-older-releases](https://github.com/dev-drprasad/delete-older-releases)
-- [peter-evans/repository-dispatch](https://github.com/peter-evans/repository-dispatch)
 
 ## License
 
-[MIT](https://github.com/P3TERX/Actions-OpenWrt/blob/main/LICENSE) © [**P3TERX**](https://p3terx.com)
+[MIT](LICENSE)
