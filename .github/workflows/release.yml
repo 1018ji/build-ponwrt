@@ -27,6 +27,7 @@ env:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   prepare:
@@ -179,4 +180,22 @@ jobs:
         while read -r OLD; do
           echo "deleting release $OLD"
           gh release delete "$OLD" --yes --cleanup-tag
+        done
+
+  cleanup:
+    needs: [prepare, build, publish]
+    if: always()
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Keep latest 7 workflow runs
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        gh run list --workflow "${{ github.workflow }}" --status completed --limit 200 --json databaseId,createdAt \
+          --jq 'sort_by(.createdAt) | reverse | .[6:] | .[].databaseId' |
+        while read -r ID; do
+          echo "deleting workflow run $ID"
+          gh run delete "$ID"
         done

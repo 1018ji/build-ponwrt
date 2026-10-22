@@ -126,3 +126,23 @@ jobs:
         path: |
           openwrt/bin/targets/airoha/${{ matrix.target }}/*initramfs-recovery.itb
           openwrt/bin/targets/airoha/${{ matrix.target }}/*squashfs-sysupgrade.itb
+
+  cleanup:
+    needs: [build]
+    if: always()
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: write
+
+    steps:
+    - name: Keep latest 7 workflow runs
+      env:
+        GH_TOKEN: ${{ github.token }}
+        GH_REPO: ${{ github.repository }}
+      run: |
+        gh run list --workflow "${{ github.workflow }}" --status completed --limit 200 --json databaseId,createdAt \
+          --jq 'sort_by(.createdAt) | reverse | .[6:] | .[].databaseId' |
+        while read -r ID; do
+          echo "deleting workflow run $ID"
+          gh run delete "$ID"
+        done
