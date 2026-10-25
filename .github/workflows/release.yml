@@ -16,6 +16,17 @@ on:
   schedule:
     - cron: '15 17 * * *'  # UTC 17:15 = 北京时间 01:15
   workflow_dispatch:
+    inputs:
+      cache:
+        description: 编译缓存
+        type: choice
+        required: false
+        default: 使用缓存
+        options:
+          - 使用缓存
+          - 只读缓存
+          - 重新编译
+          - 不使用缓存
 
 env:
   REPO_URL: https://github.com/1018ji/ponwrt
@@ -24,6 +35,9 @@ env:
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
   TZ: Asia/Shanghai
+  # 使用缓存：恢复并保存；只读缓存：只恢复不上传；重新编译：从空缓存编译并保存；不使用缓存：全部关闭
+  # 定时或外部触发没有选项，按“使用缓存”处理
+  CACHE_MODE: ${{ inputs.cache || '使用缓存' }}
 
 permissions:
   contents: write
@@ -95,6 +109,25 @@ jobs:
         git clone $REPO_URL -b $REPO_BRANCH openwrt
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
 
+    # 缓存在 clone 之后恢复，否则目录非空会导致 git clone 失败
+    - name: Restore download cache
+      if: env.CACHE_MODE != '不使用缓存'
+      uses: actions/cache/restore@v4
+      with:
+        path: /workdir/openwrt/dl
+        key: openwrt-dl-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          openwrt-dl-${{ matrix.target }}-
+
+    - name: Restore compiler cache
+      if: env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '只读缓存'
+      uses: actions/cache/restore@v4
+      with:
+        path: /workdir/openwrt/.ccache
+        key: openwrt-ccache-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          openwrt-ccache-${{ matrix.target }}-
+
     - name: Load custom feeds
       run: |
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
@@ -115,6 +148,10 @@ jobs:
         chmod +x $DIY_P2_SH
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
+        if [ "$CACHE_MODE" != "不使用缓存" ]; then
+          sed -i '/^CONFIG_DEVEL=/d; /^# CONFIG_DEVEL is not set$/d; /^CONFIG_CCACHE=/d; /^# CONFIG_CCACHE is not set$/d' .config
+          printf 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y\n' >> .config
+        fi
 
     - name: Download package
       id: package
@@ -127,6 +164,8 @@ jobs:
 
     - name: Compile the firmware
       id: compile
+      env:
+        CCACHE_MAXSIZE: 3G
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
@@ -136,6 +175,26 @@ jobs:
     - name: Check space usage
       if: (!cancelled())
       run: df -hT
+
+    - name: Show compiler cache statistics
+      if: always() && steps.compile.outcome != 'skipped' && env.CACHE_MODE != '不使用缓存'
+      run: |
+        [ -x openwrt/staging_dir/host/bin/ccache ] && CCACHE_DIR=/workdir/openwrt/.ccache openwrt/staging_dir/host/bin/ccache -s || true
+
+    # 编译失败也保存，下次重试可以复用；编译步骤没运行时不保存，避免空缓存覆盖
+    - name: Save compiler cache
+      if: always() && steps.compile.outcome != 'skipped' && (env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '重新编译')
+      uses: actions/cache/save@v4
+      with:
+        path: /workdir/openwrt/.ccache
+        key: openwrt-ccache-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+    - name: Save download cache
+      if: always() && steps.compile.outcome != 'skipped' && (env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '重新编译')
+      uses: actions/cache/save@v4
+      with:
+        path: /workdir/openwrt/dl
+        key: openwrt-dl-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
 
     - name: Upload firmware to release
       if: steps.compile.outputs.status == 'success' && !cancelled()
