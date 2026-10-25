@@ -16,8 +16,12 @@ on:
   workflow_dispatch:
     inputs:
       SSH:
-        type: boolean
-        default: false
+        type: choice
+        required: false
+        default: 否
+        options:
+          - 否
+          - 是
       Cache:
         type: choice
         required: false
@@ -128,7 +132,7 @@ jobs:
         find dl -size -1024c -exec rm -f {} \;
 
     - name: Setup SSH session
-      if: ${{ github.event_name == 'workflow_dispatch' && inputs.SSH }}
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.SSH == '是' }}
       uses: owenthereal/action-upterm@v2
       with:
         detached: true
