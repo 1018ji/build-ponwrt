@@ -15,12 +15,10 @@ name: DEV Builder
 on:
   workflow_dispatch:
     inputs:
-      ssh:
-        description: 编译前开启 SSH 调试会话
+      SSH:
         type: boolean
         default: false
-      cache:
-        description: 编译缓存
+      Cache:
         type: choice
         required: false
         default: 使用缓存
@@ -39,7 +37,7 @@ env:
   TZ: Asia/Shanghai
   # 使用缓存：恢复并保存；只读缓存：只恢复不上传；重新编译：从空缓存编译并保存；不使用缓存：全部关闭
   # 定时或外部触发没有选项，按“使用缓存”处理
-  CACHE_MODE: ${{ inputs.cache || '使用缓存' }}
+  CACHE_MODE: ${{ inputs.Cache || '使用缓存' }}
 
 jobs:
   build:
@@ -130,7 +128,7 @@ jobs:
         find dl -size -1024c -exec rm -f {} \;
 
     - name: Setup SSH session
-      if: ${{ github.event_name == 'workflow_dispatch' && inputs.ssh }}
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.SSH }}
       uses: owenthereal/action-upterm@v2
       with:
         detached: true
