@@ -45,13 +45,24 @@ permissions:
   contents: write
   actions: write
 
+# DEV 与 RELEASE 共用缓存，排队依次运行，避免同时保存和清理缓存互相覆盖
+concurrency:
+  group: ponwrt-build
+  cancel-in-progress: false
+
 jobs:
   prepare:
     runs-on: ubuntu-22.04
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
+      commit: ${{ steps.tag.outputs.commit }}
 
     steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
     - name: Create draft release
       id: tag
       env:
@@ -60,20 +71,24 @@ jobs:
       run: |
         COMMIT=$(git ls-remote "$REPO_URL" "refs/heads/$REPO_BRANCH" | cut -f1)
         [ -n "$COMMIT" ] || { echo "failed to resolve $REPO_URL $REPO_BRANCH"; exit 1; }
+        # 本仓库中影响固件内容的文件最后一次修改的 commit，改配置后即使上游没更新也重新发布
+        CONFIG_COMMIT=$(git log -1 --format=%H -- '*.config' diy-part1.sh diy-part2.sh feeds.conf.default files)
         LAST_TAG=$(gh release list --limit 200 --json tagName,name,isDraft,createdAt \
           --jq '[.[] | select(.isDraft | not) | select(.name | startswith("RELEASE-"))] | sort_by(.createdAt) | last | .tagName // empty')
         if [ -n "$LAST_TAG" ]; then
-          LAST_COMMIT=$(gh release view "$LAST_TAG" --json body --jq .body | grep -oE '[0-9a-f]{40}' | head -n1)
-          if [ "$LAST_COMMIT" = "$COMMIT" ]; then
-            echo "ponwrt $COMMIT already released in $LAST_TAG, skip build"
+          LAST_COMMITS=$(gh release view "$LAST_TAG" --json body --jq .body | grep -oE '[0-9a-f]{40}' | head -n2 | xargs)
+          if [ "$LAST_COMMITS" = "$COMMIT $CONFIG_COMMIT" ]; then
+            echo "ponwrt $COMMIT with config $CONFIG_COMMIT already released in $LAST_TAG, skip build"
             exit 0
           fi
         fi
         TAG="$(TZ="$TZ" date +%Y-%m-%d-%H-%M-%S)"
         TITLE="RELEASE-$(TZ="$TZ" date +%Y-%m-%d)"
-        NOTES="ponwrt: ${REPO_URL}/commit/${COMMIT}"
+        NOTES="ponwrt: ${REPO_URL}/commit/${COMMIT}
+        config: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${CONFIG_COMMIT}"
         gh release create "$TAG" --draft --title "$TITLE" --notes "$NOTES" --target "$GITHUB_SHA"
         echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
 
   build:
     needs: prepare
@@ -109,6 +124,8 @@ jobs:
       run: |
         df -hT $PWD
         git clone $REPO_URL -b $REPO_BRANCH openwrt
+        # 固定为 prepare 时记录的 commit，保证两个机型编译的版本与发布说明一致
+        git -C openwrt checkout -q "${{ needs.prepare.outputs.commit }}"
         # tools 的 .prepared 标记文件名里带源码文件的修改时间，固定时间后缓存的工具链才能被识别
         find openwrt/tools openwrt/toolchain -exec touch -h -d @1600000000 {} +
         ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
@@ -170,8 +187,9 @@ jobs:
         echo "dl_key=openwrt-dl-$(find dl -type f -printf '%P %s\n' | LC_ALL=C sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
     # key 按 dl 文件列表计算，没有新下载的文件时跳过上传
+    # 两个机型的软件包基本相同，只由 an7581 保存，避免两边各存一份后被清理步骤互相删掉
     - name: Save download cache
-      if: (env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '重新编译') && steps.package.outputs.dl_key != steps.dl-cache.outputs.cache-matched-key
+      if: matrix.target == 'an7581' && (env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '重新编译') && steps.package.outputs.dl_key != steps.dl-cache.outputs.cache-matched-key
       uses: actions/cache/save@v4
       with:
         path: /workdir/openwrt/dl
@@ -239,6 +257,8 @@ jobs:
       id: compile
       run: |
         cd openwrt
+        # 清零恢复来的统计数据，编译后显示的命中率只反映本次
+        [ -x staging_dir/host/bin/ccache ] && CCACHE_DIR=$PWD/.ccache staging_dir/host/bin/ccache -z || true
         echo -e "$(nproc) thread compile"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
@@ -267,7 +287,9 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
       run: |
-        for PREFIX in openwrt-dl- openwrt-ccache-${{ matrix.target }}- openwrt-toolchain-${{ matrix.target }}-; do
+        PREFIXES="openwrt-ccache-${{ matrix.target }}- openwrt-toolchain-${{ matrix.target }}-"
+        [ "${{ matrix.target }}" = "an7581" ] && PREFIXES="openwrt-dl- $PREFIXES"
+        for PREFIX in $PREFIXES; do
           gh cache list --key "$PREFIX" --sort created_at --order desc --limit 100 --json id --jq '.[1:][].id' |
           while read -r ID; do
             echo "deleting cache $ID ($PREFIX)"
@@ -298,12 +320,14 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
         TAG: ${{ needs.prepare.outputs.tag }}
+        BUILD_RESULT: ${{ needs.build.result }}
       run: |
+        # 任一机型失败都不发布，否则下次检测到 commit 已发布会跳过，失败的机型就一直没有固件
         COUNT=$(gh release view "$TAG" --json assets --jq '.assets | length')
-        if [ "$COUNT" -gt 0 ]; then
+        if [ "$BUILD_RESULT" = "success" ] && [ "$COUNT" -gt 0 ]; then
           gh release edit "$TAG" --draft=false
         else
-          echo "no firmware uploaded, deleting draft release"
+          echo "build $BUILD_RESULT, $COUNT file(s) uploaded, deleting draft release"
           gh release delete "$TAG" --yes
           exit 1
         fi

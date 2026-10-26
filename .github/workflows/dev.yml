@@ -46,6 +46,11 @@ env:
   CCACHE_COMPILERCHECK: '%compiler% -dumpmachine; %compiler% -dumpversion'
   CCACHE_MAXSIZE: 3G
 
+# DEV 与 RELEASE 共用缓存，排队依次运行，避免同时保存和清理缓存互相覆盖
+concurrency:
+  group: ponwrt-build
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-22.04
@@ -144,8 +149,9 @@ jobs:
         echo "dl_key=openwrt-dl-$(find dl -type f -printf '%P %s\n' | LC_ALL=C sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
     # key 按 dl 文件列表计算，没有新下载的文件时跳过上传
+    # 两个机型的软件包基本相同，只由 an7581 保存，避免两边各存一份后被清理步骤互相删掉
     - name: Save download cache
-      if: (env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '重新编译') && steps.package.outputs.dl_key != steps.dl-cache.outputs.cache-matched-key
+      if: matrix.target == 'an7581' && (env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '重新编译') && steps.package.outputs.dl_key != steps.dl-cache.outputs.cache-matched-key
       uses: actions/cache/save@v4
       with:
         path: /workdir/openwrt/dl
@@ -220,6 +226,8 @@ jobs:
       id: compile
       run: |
         cd openwrt
+        # 清零恢复来的统计数据，编译后显示的命中率只反映本次
+        [ -x staging_dir/host/bin/ccache ] && CCACHE_DIR=$PWD/.ccache staging_dir/host/bin/ccache -z || true
         echo -e "$(nproc) thread compile"
         make -j$(nproc) || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
@@ -248,7 +256,9 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         GH_REPO: ${{ github.repository }}
       run: |
-        for PREFIX in openwrt-dl- openwrt-ccache-${{ matrix.target }}- openwrt-toolchain-${{ matrix.target }}-; do
+        PREFIXES="openwrt-ccache-${{ matrix.target }}- openwrt-toolchain-${{ matrix.target }}-"
+        [ "${{ matrix.target }}" = "an7581" ] && PREFIXES="openwrt-dl- $PREFIXES"
+        for PREFIX in $PREFIXES; do
           gh cache list --key "$PREFIX" --sort created_at --order desc --limit 100 --json id --jq '.[1:][].id' |
           while read -r ID; do
             echo "deleting cache $ID ($PREFIX)"
