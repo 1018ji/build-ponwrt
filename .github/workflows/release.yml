@@ -30,16 +30,8 @@ on:
 env:
   REPO_URL: https://github.com/1018ji/ponwrt
   REPO_BRANCH: master
-  FEEDS_CONF: feeds.conf.default
-  DIY_P1_SH: diy-part1.sh
-  DIY_P2_SH: diy-part2.sh
   TZ: Asia/Shanghai
-  # 使用缓存：恢复并保存；只读缓存：只恢复不上传；重新编译：从空缓存编译并保存；不使用缓存：全部关闭
-  # 定时或外部触发没有选项，按“使用缓存”处理
-  CACHE_MODE: ${{ inputs.Cache || '使用缓存' }}
-  # ccache 默认按编译器文件的修改时间判断编译器是否变化，工具链重新编译后会全部不命中，改为按版本判断
-  CCACHE_COMPILERCHECK: '%compiler% -dumpmachine; %compiler% -dumpversion'
-  CCACHE_MAXSIZE: 3G
+  GH_REPO: ${{ github.repository }}
 
 permissions:
   contents: write
@@ -50,8 +42,7 @@ concurrency:
   group: ponwrt-build
   cancel-in-progress: false
 
-# 流程：check → prepare → 工具链 → 固件 → 发布 → cleanup
-# prepare 拉取源码和 feeds 后打包传给后面的 job，保证各 job 编译的源码完全一致
+# 流程：check → 编译（build.yml）→ 发布 → cleanup
 jobs:
   check:
     runs-on: ubuntu-22.04
@@ -64,7 +55,7 @@ jobs:
 
     steps:
     - name: Checkout
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -72,7 +63,6 @@ jobs:
       id: check
       env:
         GH_TOKEN: ${{ github.token }}
-        GH_REPO: ${{ github.repository }}
       run: |
         COMMIT=$(git ls-remote "$REPO_URL" "refs/heads/$REPO_BRANCH" | cut -f1)
         [ -n "$COMMIT" ] || { echo "failed to resolve $REPO_URL $REPO_BRANCH"; exit 1; }
@@ -91,379 +81,38 @@ jobs:
         echo "build=true" >> "$GITHUB_OUTPUT"
         echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
         echo "config_commit=$CONFIG_COMMIT" >> "$GITHUB_OUTPUT"
-        echo "tag=$(TZ="$TZ" date +%Y-%m-%d-%H-%M-%S)" >> "$GITHUB_OUTPUT"
-        echo "title=RELEASE-$(TZ="$TZ" date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+        echo "tag=$(date +%Y-%m-%d-%H-%M-%S)" >> "$GITHUB_OUTPUT"
+        echo "title=RELEASE-$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-  prepare:
+  build:
+    name: 编译
     needs: check
     if: needs.check.outputs.build == 'true'
-    runs-on: ubuntu-22.04
-
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v4
-
-    - &init
-      name: Initialization environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo rm -rf /etc/apt/sources.list.d/* /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force
-        sudo -E apt-get -qq update
-        sudo -E apt-get -qq install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
-        sudo -E apt-get -qq autoremove --purge
-        sudo -E apt-get -qq clean
-        sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
-
-    - name: Clone source code
-      working-directory: /workdir
-      run: |
-        df -hT $PWD
-        git clone $REPO_URL -b $REPO_BRANCH openwrt
-        # 固定为 check 时记录的 commit，保证编译的版本与发布说明一致
-        git -C openwrt checkout -q "${{ needs.check.outputs.commit }}"
-        # tools 的 .prepared 标记文件名里带源码文件的修改时间，固定时间后缓存的工具链才能被识别
-        find openwrt/tools openwrt/toolchain -exec touch -h -d @1600000000 {} +
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
-
-    - name: Load custom feeds
-      run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        [ -e files ] && mv files openwrt/files
-        chmod +x $DIY_P1_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
-
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
-
-    # feeds 跟随各自分支最新版本，每个 job 单独拉取可能不一致，统一打包传下去
-    - name: Pack source code
-      working-directory: /workdir
-      run: |
-        tar -I 'zstd -T0' -cf source.tar.zst openwrt
-        ls -lh source.tar.zst
-
-    - name: Upload source code
-      uses: actions/upload-artifact@v4
-      with:
-        name: source
-        path: /workdir/source.tar.zst
-        retention-days: 1
-        compression-level: 0
-        overwrite: true
-
-    # 缓存在 clone 之后恢复，否则目录非空会导致 git clone 失败
-    - name: Restore download cache
-      id: dl-cache
-      if: env.CACHE_MODE != '不使用缓存'
-      uses: actions/cache/restore@v4
-      with:
-        path: /workdir/openwrt/dl
-        key: openwrt-dl-
-        restore-keys: |
-          openwrt-dl-
-
-    # 两个机型一起下载，dl 缓存只在这里保存一份；源码已经打包，这里改动不影响后面的 job
-    - name: Download package
-      id: package
-      run: |
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        for CONFIG in an7581.config an7583.config; do
-          cp $GITHUB_WORKSPACE/$CONFIG .config
-          $GITHUB_WORKSPACE/$DIY_P2_SH
-          if [ "$CACHE_MODE" != "不使用缓存" ]; then
-            sed -i '/^CONFIG_DEVEL=/d; /^# CONFIG_DEVEL is not set$/d; /^CONFIG_CCACHE=/d; /^# CONFIG_CCACHE is not set$/d' .config
-            printf 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y\n' >> .config
-          fi
-          make defconfig
-          make download -j$(nproc)
-        done
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
-        echo "dl_key=openwrt-dl-$(find dl -type f -printf '%P %s\n' | LC_ALL=C sort | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
-
-    # key 按 dl 文件列表计算，没有新下载的文件时跳过上传
-    - name: Save download cache
-      if: (env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '重新编译') && steps.package.outputs.dl_key != steps.dl-cache.outputs.cache-matched-key
-      uses: actions/cache/save@v4
-      with:
-        path: /workdir/openwrt/dl
-        key: ${{ steps.package.outputs.dl_key }}
-
-    # 每类缓存只保留最新一份，避免超过仓库 10GB 上限后被自动淘汰
-    - name: Remove old download caches
-      if: always() && (env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '重新编译')
-      env:
-        GH_TOKEN: ${{ github.token }}
-        GH_REPO: ${{ github.repository }}
-      run: |
-        gh cache list --key openwrt-dl- --sort created_at --order desc --limit 100 --json id --jq '.[1:][].id' |
-        while read -r ID; do
-          echo "deleting cache $ID"
-          gh cache delete "$ID"
-        done
-
-  toolchain:
-    name: 工具链
-    needs: prepare
-    runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [an7581, an7583]
-    env:
-      CONFIG_FILE: ${{ matrix.target }}.config
-
-    steps:
-    - &checkout
-      name: Checkout
-      uses: actions/checkout@v4
-
-    - *init
-
-    - &source
-      name: Download source code
-      uses: actions/download-artifact@v4
-      with:
-        name: source
-        path: /workdir
-
-    - &extract
-      name: Extract source code
-      working-directory: /workdir
-      run: |
-        df -hT $PWD
-        tar -I zstd -xf source.tar.zst
-        rm -f source.tar.zst
-        ln -sf /workdir/openwrt $GITHUB_WORKSPACE/openwrt
-
-    - &dl
-      name: Restore download cache
-      if: env.CACHE_MODE != '不使用缓存'
-      uses: actions/cache/restore@v4
-      with:
-        path: /workdir/openwrt/dl
-        key: openwrt-dl-
-        restore-keys: |
-          openwrt-dl-
-
-    - &config
-      name: Load custom configuration
-      run: |
-        cp $CONFIG_FILE openwrt/.config
-        chmod +x $DIY_P2_SH
-        cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
-        if [ "$CACHE_MODE" != "不使用缓存" ]; then
-          sed -i '/^CONFIG_DEVEL=/d; /^# CONFIG_DEVEL is not set$/d; /^CONFIG_CCACHE=/d; /^# CONFIG_CCACHE is not set$/d' .config
-          printf 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y\n' >> .config
-        fi
-        make defconfig
-
-    # 工具链缓存：key 由 tools / toolchain / include 等源码和工具链相关配置算出，只接受完全匹配，源码一变就重新编译
-    - &key
-      name: Compute toolchain cache key
-      id: toolchain
-      run: |
-        cd openwrt
-        BOARD=$(sed -n 's/^CONFIG_TARGET_BOARD="\(.*\)"$/\1/p' .config)
-        SUBTARGET=$(sed -n 's/^CONFIG_TARGET_SUBTARGET="\(.*\)"$/\1/p' .config)
-        HASH=$({
-          git rev-parse HEAD:tools HEAD:toolchain HEAD:include HEAD:rules.mk "HEAD:target/linux/$BOARD/Makefile"
-          git rev-parse "HEAD:target/linux/$BOARD/$SUBTARGET/target.mk" 2>/dev/null || true
-          grep -E '^CONFIG_(ARCH|TARGET_ARCH_PACKAGES|CPU_TYPE|TARGET_OPTIMIZATION|EXTRA_OPTIMIZATION|SOFT_FLOAT|GCC_|BINUTILS_|LIBC|MUSL|GLIBC|TOOLCHAIN|EXTERNAL_TOOLCHAIN|USE_|CCACHE|DEVEL|INSTALL_|GDB|SSP_|BUILD_NLS)' .config
-        } | sha256sum | cut -c1-16)
-        echo "key=openwrt-toolchain-${{ matrix.target }}-$HASH" >> "$GITHUB_OUTPUT"
-
-    # 已有缓存时只检查不下载，固件 job 会自己恢复
-    - name: Check toolchain cache
-      id: toolchain-cache
-      if: env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '只读缓存'
-      uses: actions/cache/restore@v4
-      with:
-        path: &toolchain-path |
-          /workdir/openwrt/staging_dir/host
-          /workdir/openwrt/staging_dir/toolchain-*
-          /workdir/openwrt/build_dir/host
-          /workdir/openwrt/build_dir/toolchain-*
-        key: ${{ steps.toolchain.outputs.key }}
-        lookup-only: true
-
-    - name: Compile tools and toolchain
-      id: toolchain-build
-      if: steps.toolchain-cache.outputs.cache-hit != 'true'
-      run: |
-        cd openwrt
-        make -j$(nproc) tools/install toolchain/install || make -j1 V=s tools/install toolchain/install
-
-    - name: Remove stale toolchain cache
-      if: steps.toolchain-build.outcome == 'success' && env.CACHE_MODE == '重新编译'
-      env:
-        GH_TOKEN: ${{ github.token }}
-        GH_REPO: ${{ github.repository }}
-      run: gh cache delete "${{ steps.toolchain.outputs.key }}" || true
-
-    - name: Save toolchain cache
-      if: steps.toolchain-build.outcome == 'success' && (env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '重新编译')
-      uses: actions/cache/save@v4
-      with:
-        path: *toolchain-path
-        key: ${{ steps.toolchain.outputs.key }}
-
-    # 只读缓存 / 不使用缓存时不保存长期缓存，用本次运行专用的 key 传给固件 job，cleanup 时删除
-    - name: Hand off toolchain
-      if: steps.toolchain-build.outcome == 'success' && (env.CACHE_MODE == '只读缓存' || env.CACHE_MODE == '不使用缓存')
-      uses: actions/cache/save@v4
-      with:
-        path: *toolchain-path
-        key: openwrt-handoff-${{ github.run_id }}-toolchain-${{ matrix.target }}
-
-    - name: Remove old toolchain caches
-      if: always() && (env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '重新编译')
-      env:
-        GH_TOKEN: ${{ github.token }}
-        GH_REPO: ${{ github.repository }}
-      run: |
-        gh cache list --key "openwrt-toolchain-${{ matrix.target }}-" --sort created_at --order desc --limit 100 --json id --jq '.[1:][].id' |
-        while read -r ID; do
-          echo "deleting cache $ID"
-          gh cache delete "$ID"
-        done
-
-  firmware:
-    name: 固件
-    needs: [prepare, toolchain]
-    # 某个机型的工具链失败也继续，拿不到缓存时会在这里重新编译工具链
-    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
-    runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [an7581, an7583]
-    env:
-      CONFIG_FILE: ${{ matrix.target }}.config
-
-    steps:
-    - *checkout
-    - *init
-    - *source
-    - *extract
-    - *dl
-
-    - name: Restore compiler cache
-      if: env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '只读缓存'
-      uses: actions/cache/restore@v4
-      with:
-        path: /workdir/openwrt/.ccache
-        key: openwrt-ccache-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: |
-          openwrt-ccache-${{ matrix.target }}-
-
-    - *config
-
-    - name: Download package
-      run: |
-        cd openwrt
-        make download -j$(nproc)
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
-
-    - *key
-
-    - name: Restore toolchain cache
-      id: toolchain-cache
-      uses: actions/cache/restore@v4
-      with:
-        path: *toolchain-path
-        key: ${{ env.CACHE_MODE != '不使用缓存' && steps.toolchain.outputs.key || format('openwrt-handoff-{0}-toolchain-{1}', github.run_id, matrix.target) }}
-        restore-keys: |
-          openwrt-handoff-${{ github.run_id }}-toolchain-${{ matrix.target }}
-
-    - name: Compile the firmware
-      id: compile
-      env:
-        TOOLCHAIN_KEY: ${{ steps.toolchain-cache.outputs.cache-matched-key }}
-      run: |
-        cd openwrt
-        # 恢复的文件统一刷新为当前时间，避免比本次新生成的 .config 等文件旧而触发重新编译
-        if [ -n "$TOOLCHAIN_KEY" ]; then
-          find staging_dir/host staging_dir/toolchain-* build_dir/host build_dir/toolchain-* -exec touch -h -d "@$(date +%s)" {} +
-        else
-          echo "toolchain cache not found, will compile toolchain here"
-        fi
-        # 清零恢复来的统计数据，编译后显示的命中率只反映本次
-        [ -x staging_dir/host/bin/ccache ] && CCACHE_DIR=$PWD/.ccache staging_dir/host/bin/ccache -z || true
-        echo -e "$(nproc) thread compile"
-        make -j$(nproc) || make -j1 || make -j1 V=s
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
-
-    - name: Show compiler cache statistics
-      if: always() && steps.compile.outcome != 'skipped' && env.CACHE_MODE != '不使用缓存'
-      run: |
-        [ -x openwrt/staging_dir/host/bin/ccache ] && CCACHE_DIR=/workdir/openwrt/.ccache openwrt/staging_dir/host/bin/ccache -s || true
-
-    # 编译失败也保存，下次重试可以复用；编译步骤没运行时不保存，避免空缓存覆盖
-    - name: Save compiler cache
-      if: always() && steps.compile.outcome != 'skipped' && (env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '重新编译')
-      uses: actions/cache/save@v4
-      with:
-        path: /workdir/openwrt/.ccache
-        key: openwrt-ccache-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
-
-    - name: Remove old compiler caches
-      if: always() && (env.CACHE_MODE == '使用缓存' || env.CACHE_MODE == '重新编译')
-      env:
-        GH_TOKEN: ${{ github.token }}
-        GH_REPO: ${{ github.repository }}
-      run: |
-        gh cache list --key "openwrt-ccache-${{ matrix.target }}-" --sort created_at --order desc --limit 100 --json id --jq '.[1:][].id' |
-        while read -r ID; do
-          echo "deleting cache $ID"
-          gh cache delete "$ID"
-        done
-
-    - name: Upload firmware
-      if: steps.compile.outputs.status == 'success' && !cancelled()
-      uses: actions/upload-artifact@v4
-      with:
-        name: firmware-${{ matrix.target }}
-        retention-days: 1
-        if-no-files-found: error
-        overwrite: true
-        path: |
-          openwrt/bin/targets/airoha/${{ matrix.target }}/*initramfs-recovery.itb
-          openwrt/bin/targets/airoha/${{ matrix.target }}/*squashfs-sysupgrade.itb
+    uses: ./.github/workflows/build.yml
+    with:
+      cache_mode: ${{ inputs.Cache || '使用缓存' }}
+      # 固定为 check 时记录的 commit，保证编译的版本与发布说明一致
+      commit: ${{ needs.check.outputs.commit }}
+      artifact_prefix: RELEASE
+      retention_days: 1
 
   publish:
     name: 发布
     # 任一机型失败都不发布，否则下次检测到 commit 已发布会跳过，失败的机型就一直没有固件
-    needs: [check, firmware]
+    needs: [check, build]
     runs-on: ubuntu-22.04
 
     steps:
     - name: Download firmware
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
-        pattern: firmware-*
+        pattern: RELEASE-*
         path: firmware
         merge-multiple: true
 
     - name: Create release
       env:
         GH_TOKEN: ${{ github.token }}
-        GH_REPO: ${{ github.repository }}
         TAG: ${{ needs.check.outputs.tag }}
         TITLE: ${{ needs.check.outputs.title }}
         COMMIT: ${{ needs.check.outputs.commit }}
@@ -477,7 +126,6 @@ jobs:
     - name: Keep latest 7 releases
       env:
         GH_TOKEN: ${{ github.token }}
-        GH_REPO: ${{ github.repository }}
       run: |
         gh release list --limit 200 --json tagName,name,isDraft,createdAt \
           --jq '[.[] | select(.isDraft | not) | select(.name | startswith("RELEASE-"))] | sort_by(.createdAt) | reverse | .[7:] | .[].tagName' |
@@ -487,26 +135,14 @@ jobs:
         done
 
   cleanup:
-    needs: [check, prepare, toolchain, firmware, publish]
+    needs: [check, build, publish]
     if: always()
     runs-on: ubuntu-22.04
 
     steps:
-    - name: Remove hand-off caches
-      env:
-        GH_TOKEN: ${{ github.token }}
-        GH_REPO: ${{ github.repository }}
-      run: |
-        gh cache list --key "openwrt-handoff-${{ github.run_id }}-" --limit 100 --json id --jq '.[].id' |
-        while read -r ID; do
-          echo "deleting cache $ID"
-          gh cache delete "$ID"
-        done
-
     - name: Keep latest 7 workflow runs
       env:
         GH_TOKEN: ${{ github.token }}
-        GH_REPO: ${{ github.repository }}
       run: |
         gh run list --workflow "${{ github.workflow }}" --status completed --limit 200 --json databaseId,createdAt \
           --jq 'sort_by(.createdAt) | reverse | .[6:] | .[].databaseId' |
