@@ -18,7 +18,12 @@
 | **RELEASE Builder**（`release.yml`） | 每天北京时间 01:15 自动运行，也可手动触发 | Release `RELEASE-YYYY-MM-DD` | 最近 7 个 |
 | **DEV Builder**（`dev.yml`） | 仅手动触发，可选开启 SSH 调试 | Artifact `DEV-YYYY-MM-DD-<机型>` | 3 天 |
 
-两个 workflow 都会在两台 runner 上并行编译 AN7581 和 AN7583，一个机型失败不影响另一个。每个 workflow 的 Actions 运行记录仅保留最新 7 条（含日志，删除后不可恢复）。
+两个 workflow 都按阶段拆成多个 job，工具链和固件阶段在两台 runner 上并行编译 AN7581 和 AN7583，一个机型失败不影响另一个：
+
+- RELEASE：`check` → `prepare` → `工具链` → `固件` → `发布` → `cleanup`
+- DEV：`prepare` → `工具链` → `固件` → `cleanup`
+
+`prepare` 拉取源码和 feeds 后打包传给后续 job，并下载两个机型所需的软件包；固件失败时可用 Re-run failed jobs 只重跑固件阶段。每个 workflow 的 Actions 运行记录仅保留最新 7 条（含日志，删除后不可恢复）。
 
 ### RELEASE
 
